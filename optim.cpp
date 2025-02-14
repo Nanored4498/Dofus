@@ -154,6 +154,7 @@ array<int, SLOTS> optimize(const array<double, EFFECTS> &W) {
 			}
 			scp += bonus[min(cur.size()-1, p.effects.size()-1)];
 			
+			updt_A:
 			for(int m = 0; m < (int) B.size(); ++m) {
 				if((m>>Item::Dofus)&1 && !((m>>Item::Anneau)&1)) continue;
 				if(m&m2) continue;
@@ -163,6 +164,15 @@ array<int, SLOTS> optimize(const array<double, EFFECTS> &W) {
 				A[m3].first = sc2;
 				A[m3].second = B[m].second;
 				for(const auto &[t, i] : cur) A[m3].second[t] = i;
+			}
+
+			if((m2>>Item::Anneau)&1 && !((m2>>Item::Dofus)&1)) {
+				m2 ^= (1<<Item::Anneau) | (1<<Item::Dofus);
+				for(auto &[t, i] : cur) if(t == Item::Anneau) {
+					t = Item::Dofus;
+					break;
+				}
+				goto updt_A;
 			}
 
 			// TODO: second slot of ring

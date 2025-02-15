@@ -6,7 +6,7 @@
 std::vector<std::pair<std::string, double>>
 
 MULTI_DO_FIXE_12_5_165 = {
-	{"PA", 1100.0},
+	{"PA", 1300.0},
 	{"Portée", 0.1},
 	
 	{"Puissance", 3.0},

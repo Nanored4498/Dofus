@@ -6,6 +6,7 @@
 #include <limits>
 #include <algorithm>
 #include <unordered_map>
+#include <unordered_set>
 #include <map>
 
 #include "weights.h"
@@ -21,6 +22,10 @@ constexpr int EFFECTS = 52;
 constexpr int SLOTS = 16;
 constexpr int NDOFUS = 6;
 constexpr int SLOTS_WD = SLOTS - NDOFUS;
+
+unordered_set<string> blacklist = {
+	"Dofus_Ocre"
+};
 
 struct Effect {
 	int id, min, max;
@@ -117,7 +122,7 @@ bool check_cond_PA_PM(int c) {
 }
 
 bool check_item(const Item &it) {
-	return it.level <= LVL && check_cond_PA_PM(it.condition);
+	return it.level <= LVL && check_cond_PA_PM(it.condition) && !blacklist.count(it.name);
 }
 
 array<int, SLOTS> optimize(const array<double, EFFECTS> &W) {

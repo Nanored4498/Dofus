@@ -7,7 +7,13 @@
 #include <algorithm>
 #include <unordered_map>
 
+#include "weights.h"
+
 using namespace std;
+
+const int LVL = 165;
+const int PA = 12;
+const int PM = 5;
 
 constexpr int EFFECTS = 52;
 constexpr int SLOTS = 16;
@@ -18,6 +24,7 @@ struct Effect {
 	int id, min, max;
 };
 array<string, EFFECTS> effects_name;
+unordered_map<string, int> s2i;
 
 struct Condition {
 	enum TYPE { AND, OR, INF, SUP };
@@ -80,6 +87,37 @@ double score(const array<double, EFFECTS> &W, const Item &it) {
 	return sc;
 }
 
+bool check_cond(const array<int, EFFECTS> &stats, int c) {
+	const Condition &cond = conditions[c];
+	if(cond.type == Condition::AND || cond.type == Condition::OR) {
+		cout << '[';
+		const bool a = check_cond(stats, cond.a);
+		cout << (cond.type == Condition::AND ? " AND " : " OR ");
+		const bool b = check_cond(stats, cond.b);
+		cout << ']';
+		return cond.type == Condition::AND ? (a&&b) : (a||b);
+	}
+	cout << effects_name[cond.effect_id] << '(' << stats[cond.effect_id] << ") " << "<>"[cond.type-2] << ' ' << cond.value;
+	return cond.type == Condition::INF ? stats[cond.effect_id] < cond.value : stats[cond.effect_id] > cond.value;
+}
+
+bool check_cond_PA_PM(int c) {
+	if(c == -1) return true;
+	const Condition &cond = conditions[c];
+	if(cond.type == Condition::AND || cond.type == Condition::OR) {
+		const bool a = check_cond_PA_PM(cond.a);
+		const bool b = check_cond_PA_PM(cond.b);
+		return cond.type == Condition::AND ? (a&&b) : (a||b);
+	}
+	if(cond.effect_id == s2i["PA"]) return cond.type == Condition::INF ? PA < cond.value : PA > cond.value;
+	if(cond.effect_id == s2i["PM"]) return cond.type == Condition::INF ? PM < cond.value : PM > cond.value;
+	return true;
+}
+
+bool check_item(const Item &it) {
+	return it.level <= LVL && check_cond_PA_PM(it.condition);
+}
+
 array<int, SLOTS> optimize(const array<double, EFFECTS> &W) {
 	array<int, SLOTS> sol;
 
@@ -89,6 +127,7 @@ array<int, SLOTS> optimize(const array<double, EFFECTS> &W) {
 	for(int i = 0; i < (int) items.size(); ++i) {
 		const Item &it = items[i];
 		if(it.pano) continue;
+		if(!check_item(it)) continue;
 		const double sc = score(W, it);
 		switch(it.type) {
 		case Item::Anneau:
@@ -107,10 +146,21 @@ array<int, SLOTS> optimize(const array<double, EFFECTS> &W) {
 		}
 	}
 
-	array<pair<double, array<int, SLOTS_WD>>, 1<<SLOTS_WD> A, B;
+	array<
+		// array<array<
+		array<
+			pair<double, array<int, SLOTS_WD>>,
+			// 4>, PM-2>,
+			4>,
+		(1<<SLOTS_WD)
+	> A;
 	for(int m = 0; m < (int) A.size(); ++m) {
-		if((m>>Item::Dofus)&1 && !((m>>Item::Anneau)&1)) continue;
-		auto &[sc, a] = A[m];
+		for(int b = 1; b < 4; ++b) A[m][b].first = numeric_limits<double>::min();
+		if((m>>Item::Dofus)&1 && !((m>>Item::Anneau)&1)) {
+			A[m][0].first = numeric_limits<double>::min();
+			continue;
+		}
+		auto &[sc, a] = A[m][0];
 		sc = 0;
 		a.fill(-1);
 		for(int u = 0; u < SLOTS_WD; ++u) if((m>>u)&1) {
@@ -119,75 +169,111 @@ array<int, SLOTS> optimize(const array<double, EFFECTS> &W) {
 		}
 	}
 
-	cerr << A.back().first << endl;
-
 	for(const Pano &p : panos) {
-		B = A;
 		vector<pair<double, int>> its;
 		vector<double> bonus;
-		for(int i : p.items) its.emplace_back(score(W, items[i]), items[i].type);
+		for(int i : p.items) if(check_item(items[i]))
+			its.emplace_back(score(W, items[i]), i);
 		for(const vector<Effect> &es : p.effects) {
 			double sc = 0;
 			for(const Effect &e : es) sc += W[e.id] * e.max;
 			bonus.push_back(sc);
 		}
-		vector<pair<int, int>> cur;
 
-		const int ps = its.size();
-		const int MP = 1<<ps;
+		struct Subset {
+			vector<pair<int, int>> updt;
+			double score = 0.;
+			int m = 0;
+			int bonus;
+		};
+		vector<Subset> subsets;
+		const int nits = its.size();
+		const int MP = 1<<nits;
 		for(int mp = 1; mp < MP; ++mp) {
-			double scp = 0;
-			int m2 = 0;
-			cur.clear();
-			for(int u = 0; u < ps; ++u) if((mp>>u)&1) {
-				int t = its[u].second;
-				if(m2&(1<<t)) {
-					if(t == Item::Arme) goto end_of_pano_sub;
+			Subset &ss = subsets.emplace_back();
+			for(int u = 0; u < nits; ++u) if((mp>>u)&1) {
+				const auto &[sc, i] = its[u];
+				int t = items[i].type;
+				if(ss.m&(1<<t)) {
+					if(t == Item::Arme) goto bad_sub;
 					if(t == Item::Anneau) {
 						t = Item::Dofus;
-						if(m2&(1<<t)) goto end_of_pano_sub;
+						if(ss.m&(1<<t)) goto bad_sub;
 					} else assert(false);
 				}
-				scp += its[u].first;
-				m2 |= 1<<t;
-				cur.emplace_back(t, p.items[u]);
+				ss.score += sc;
+				ss.m |= 1<<t;
+				ss.updt.emplace_back(t, i);
 			}
-			scp += bonus[min(cur.size()-1, p.effects.size()-1)];
-			
-			updt_A:
-			for(int m = 0; m < (int) B.size(); ++m) {
-				if((m>>Item::Dofus)&1 && !((m>>Item::Anneau)&1)) continue;
-				if(m&m2) continue;
-				const double sc2 = B[m].first + scp;
-				const int m3 = m|m2;
-				if(A[m3].first >= sc2) continue;
-				A[m3].first = sc2;
-				A[m3].second = B[m].second;
-				for(const auto &[t, i] : cur) A[m3].second[t] = i;
-			}
-
-			if((m2>>Item::Anneau)&1 && !((m2>>Item::Dofus)&1)) {
-				m2 ^= (1<<Item::Anneau) | (1<<Item::Dofus);
-				for(auto &[t, i] : cur) if(t == Item::Anneau) {
+			ss.score += bonus[ss.bonus = min(ss.updt.size()-1, bonus.size()-1)];
+			if((ss.m>>Item::Anneau)&1 && !((ss.m>>Item::Dofus)&1)) {
+				subsets.push_back(ss);
+				subsets.back().m ^= (1<<Item::Anneau) | (1<<Item::Dofus);
+				for(auto &[t, i] : subsets.back().updt) if(t == Item::Anneau) {
 					t = Item::Dofus;
 					break;
 				}
-				goto updt_A;
 			}
-
-			// TODO: second slot of ring
-			end_of_pano_sub:
 			continue;
+			bad_sub:
+			subsets.pop_back();
+			continue;
+		}
+
+		for(int m = A.size()-1; m >= 0; --m) {
+			if(A[m][0].first == numeric_limits<double>::min()) continue;
+			for(const auto &[updt, score, m2, bonus2] : subsets) {
+				if(m&m2) continue;
+				for(int bonus = 0; bonus < 4; ++bonus) {
+					if(A[m][bonus].first == numeric_limits<double>::min()) continue;
+					const double sc2 = A[m][bonus].first + score;
+					const int m3 = m|m2;
+					const int bonus3 = min(bonus + bonus2, 3);
+					if(A[m3][bonus3].first >= sc2) continue;
+					A[m3][bonus3].first = sc2;
+					A[m3][bonus3].second = A[m][bonus].second;
+					for(const auto &[t, i] : updt) A[m3][bonus3].second[t] = i;
+				}
+			}
 		}
 	}
 
-	cerr << A.back().first << endl;
-
 	sort(dofus.rbegin(), dofus.rend());
-	for(int i = 0; i < NDOFUS; ++i)
-		sol[SLOTS_WD + i] = dofus[i].second;
+	double dofus_score_1 = 0., dofus_score_2 = 0.;
+	array<int, NDOFUS> dofus_1, dofus_2;
+	dofus_1.fill(-1);
+	dofus_2.fill(-1);
+	for(int i = 0; i < NDOFUS; ++i) {
+		dofus_score_1 += dofus[i].first;
+		dofus_1[i] = dofus[i].second;
+	}
+	for(int i = 0, j = 0; i < NDOFUS; ++i, ++j) {
+		while(j < (int) dofus.size()) {
+			const int c = items[dofus[j].second].condition;
+			if(c == -1) break;
+			if(conditions[c].type < 2) break;
+			if(conditions[c].effect_id != s2i["Bonus_de_panoplies"]) break;
+			assert(conditions[c].value == 3);
+			++j;
+		}
+		if(j >= (int) dofus.size()) break;
+		dofus_score_2 += dofus[j].first;
+		dofus_2[i] = dofus[j].second;
+	}
+
+	int best_bonus = max_element(A.back().begin(), A.back().begin()+3) - A.back().begin();
+	double best_score = A.back()[best_bonus].first + dofus_score_1;
+	if(best_score < A.back()[3].first + dofus_score_2) {
+		best_bonus = 3;
+		best_score = A.back()[3].first + dofus_score_2;
+		copy_n(dofus_2.begin(), NDOFUS, sol.begin()+SLOTS_WD);
+	} else {
+		copy_n(dofus_1.begin(), NDOFUS, sol.begin()+SLOTS_WD);
+	}
 	for(int i = 0; i < SLOTS_WD; ++i)
-		sol[i] = A.back().second[i];
+		sol[i] = A.back()[best_bonus].second[i];
+	
+	cerr << "Score: " << best_score << endl;
 	
 	return sol;
 }
@@ -203,25 +289,18 @@ int main() {
 	data >> N_EFFECTS_IN;
 	assert(N_EFFECTS_IN == EFFECTS);
 	for(string &name : effects_name) data >> name;
-	cout << EFFECTS << endl;
-	
+
 	int N_ITEMS;
 	data >> N_ITEMS;
 	items.resize(N_ITEMS);
-	array<int, Item::TYPE::SIZE> tc;
-	tc.fill(0);
-	cout << N_ITEMS << endl;
 	for(Item &it : items) {
 		int type, n_effects;
 		data >> it.name >> it.level >> type >> n_effects;
 		it.type = (Item::TYPE) type;
-		++ tc[it.type];
 		it.effects.resize(n_effects);
 		for(auto &[id, min, max] : it.effects) data >> id >> min >> max;
 		it.condition = read_condition(data);
 	}
-	for(int c : tc) cout << c << " ";
-	cout << endl;
 
 	int N_PANOS;
 	data >> N_PANOS;
@@ -244,40 +323,44 @@ int main() {
 			for(auto &[id, min, max] : es) data >> id >> min >> max;
 		}
 	}
-	cout << N_PANOS << endl;
 
-	unordered_map<string, int> s2i;
 	for(int i = 0; i < EFFECTS; ++i)
 		s2i[effects_name[i]] = i;
 
 	array<double, EFFECTS> W;
-	W.fill(0.0);
-	W[s2i["Force"]] = 3.;
-	W[s2i["Dommage_Terre"]] = 9.;
-	W[s2i["Vitalité"]] = 1.;
-	W[s2i["\%_Critique"]] = 6.;
-	W[s2i["Tacle"]] = 0.2;
-	W[s2i["PM"]] = 1.;
-	W[s2i["PA"]] = 180.;
-	W[s2i["Dommage"]] = 10.;
-	W[s2i["Puissance"]] = 4.;
-	W[s2i["Dommage_Critiques"]] = 4.;
-	W[s2i["Dommage_Poussée"]] = 1.;
-	W[s2i["Retrait_PM"]] = 1.;
-	W[s2i["Retrait_PA"]] = 1.;
-	W[s2i["%_Résistance_Terre"]] = 3.;
-	W[s2i["%_Résistance_Neutre"]] = 3.;
-	W[s2i["%_Résistance_Eau"]] = 3.;
-	W[s2i["%_Résistance_Air"]] = 3.;
-	W[s2i["%_Résistance_Feu"]] = 3.;
-	W[s2i["Résistance_Terre"]] = 2.;
-	W[s2i["Résistance_Neutre"]] = 2.;
-	W[s2i["Résistance_Eau"]] = 2.;
-	W[s2i["Résistance_Air"]] = 2.;
-	W[s2i["Résistance_Feu"]] = 2.;
+	for(const auto &[s, v] : MULTI_DO_FIXE_12_5_165)
+		W[s2i[s]] = v;
 
 	array<int, SLOTS> sol = optimize(W);
-	for(int i : sol) cout << items[i].name << ' ' << items[i].pano << ' ' << score(W, items[i]) << endl;
+	for(int i : sol) {
+		for(char &c : items[i].name) if(c == '_') c = ' ';
+		cout << items[i].name << '\n';
+	}
+
+	array<int, EFFECTS> stats;
+	stats.fill(0);
+	stats[s2i["PA"]] = LVL < 100 ? 6 : 7;
+	stats[s2i["PM"]] = 3;
+	unordered_map<int, int> pan_set;
+	for(int i : sol) {
+		for(const auto &[id, min, max] : items[i].effects) stats[id] += max;
+		if(items[i].pano) {
+			if(pan_set.count(items[i].pano)) ++ stats[s2i["Bonus_de_panoplies"]];
+			++ pan_set[items[i].pano];
+		}
+	}
+	for(const auto &[p, c] : pan_set) if(c > 1)
+		cout << "Bonus " << panos[p-1].name << " " << c << "\n";
+	for(const string &s : {"PA", "PM"})
+		cout << s << ": " << stats[s2i[s]] << '\n';
+	
+	for(int i : sol) {
+		const int c = items[i].condition;
+		if(c == -1) continue;
+		cout << items[i].name << endl;
+		const bool v = check_cond(stats, c);
+		cout << "  => " << v << endl;
+	}
 
 	return 0;
 }

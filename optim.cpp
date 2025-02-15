@@ -6,6 +6,7 @@
 #include <limits>
 #include <algorithm>
 #include <unordered_map>
+#include <map>
 
 #include "weights.h"
 
@@ -14,6 +15,7 @@ using namespace std;
 const int LVL = 165;
 const int PA = 12;
 const int PM = 5;
+static_assert(PM > 4);
 
 constexpr int EFFECTS = 52;
 constexpr int SLOTS = 16;
@@ -119,72 +121,125 @@ bool check_item(const Item &it) {
 }
 
 array<int, SLOTS> optimize(const array<double, EFFECTS> &W) {
+	constexpr int PMA = PM+2;
+	const int PMID = s2i["PM"];
 	array<int, SLOTS> sol;
+	vector<pair<double, int>> dofus[3];
 
-	array<pair<int, double>, SLOTS_WD> best_solo;
-	vector<pair<double, int>> dofus;
-	best_solo.fill(make_pair(-1, numeric_limits<double>::min()));
-	for(int i = 0; i < (int) items.size(); ++i) {
+	// Init DP
+	array<
+		array<array<
+			pair<double, array<int, SLOTS_WD>>,
+			PMA>, 4>,
+		(1<<SLOTS_WD)
+	> A; // A[m][bonus][pm]
+	for(int m = 0; m < (int) A.size(); ++m)
+		for(int b = 0; b < 4; ++b)
+			for(int pm = 0; pm < PMA; ++pm) {
+				A[m][b][pm].first = numeric_limits<double>::min();
+				A[m][b][pm].second.fill(-2);
+			}
+	A[0][0][2].first = 0.;
+	A[0][0][2].second.fill(-1);
+
+	// Update for each item not int pano
+	map<pair<int, int>, pair<int, int>> usefull_items;
+	for(int i = 1; i < (int) items.size(); ++i) {
 		const Item &it = items[i];
 		if(it.pano) continue;
-		if(!check_item(it)) continue;
-		const double sc = score(W, it);
-		switch(it.type) {
-		case Item::Anneau:
-			if(best_solo[Item::Dofus].first < sc) {
-				best_solo[Item::Dofus] = make_pair(sc, i);
-				if(best_solo[Item::Anneau].first < sc)
-					swap(best_solo[Item::Anneau], best_solo[Item::Dofus]);
-			}
-			break;
-		case Item::Dofus:
-			dofus.emplace_back(sc, i);
-			break;
-		default:
-			if(best_solo[it.type].first < sc)
-				best_solo[it.type] = make_pair(sc, i);
-		}
-	}
-
-	array<
-		// array<array<
-		array<
-			pair<double, array<int, SLOTS_WD>>,
-			// 4>, PM-2>,
-			4>,
-		(1<<SLOTS_WD)
-	> A;
-	for(int m = 0; m < (int) A.size(); ++m) {
-		for(int b = 1; b < 4; ++b) A[m][b].first = numeric_limits<double>::min();
-		if((m>>Item::Dofus)&1 && !((m>>Item::Anneau)&1)) {
-			A[m][0].first = numeric_limits<double>::min();
+		if(!check_item(it)) continue;;
+		int pm = 0;
+		for(const Effect &e : it.effects) if(e.id == PMID) pm += e.max;
+		if(it.type == Item::Dofus) {
+			assert(-1 <= pm && pm <= 1);
+			dofus[pm+1].emplace_back(score(W, it), i);
 			continue;
 		}
-		auto &[sc, a] = A[m][0];
-		sc = 0;
-		a.fill(-1);
-		for(int u = 0; u < SLOTS_WD; ++u) if((m>>u)&1) {
-			sc += best_solo[u].first;
-			a[u] = best_solo[u].second;
+		pair<int, int> tpm {it.type, pm};
+		if(usefull_items.count(tpm)) {
+			const double sc = score(W, it);
+			auto &best = usefull_items[tpm];
+			if(it.type == Item::Anneau) {
+				if(best.second == -1 || score(W, items[best.second]) < sc) {
+					best.second = i;
+					if(score(W, items[best.first]) < sc)
+						swap(best.first, best.second);
+				}
+			} else if(score(W, items[best.first]) < sc)
+				best.first = i;
+		} else usefull_items[tpm] = make_pair(i, -1);
+	}
+	for(const auto &[k, pi] : usefull_items) {
+		const int i = pi.first;
+		const auto &[t, pmi] = k;
+		const double sci = score(W, items[i]);
+		const int m2 = 1<<t;
+		const int PM_0 = max(-pmi, 0);
+		const int PM_1 = PMA - max(pmi, 0);
+		const auto update = [&](const int m, const int m2, const int PM_0, const int PM_1, const int pm2, const double sc2, const int j=-1) {
+			if(m&m2) return;
+			const int m3 = m|m2;
+			for(int pm = PM_0; pm < PM_1; ++pm) {
+				if(A[m][0][pm].first == numeric_limits<double>::min()) continue;
+				const double sc3 = A[m][0][pm].first + sc2;
+				const int pm3 = pm + pm2;
+				if(A[m3][0][pm3].first >= sc3) continue;
+				A[m3][0][pm3].first = sc3;
+				A[m3][0][pm3].second = A[m][0][pm].second;
+				A[m3][0][pm3].second[t] = i;
+				if(j != -1) A[m3][0][pm3].second[Item::Dofus] = j;
+			}
+		};
+		if(pi.second != -1) {
+			const int j = pi.second;
+			const int m2b = m2 | (1<<Item::Dofus);
+			const int PM_0b = max(-2*pmi, 0);
+			const int PM_1b = PMA - max(2*pmi, 0);
+			const int pmib = 2*pmi;
+			const int scib = sci + score(W, items[j]);
+			for(int m = A.size()-1; m >= 0; --m) {
+				if((m>>Item::Dofus)&1 && !((m>>Item::Anneau)&1)) continue;
+				update(m, m2, PM_0, PM_1, pmi, sci);
+				update(m, m2b, PM_0b, PM_1b, pmib, scib, j);
+			}
+		} else {
+			for(int m = A.size()-1; m >= 0; --m) {
+				if((m>>Item::Dofus)&1 && !((m>>Item::Anneau)&1)) continue;
+				update(m, m2, PM_0, PM_1, pmi, sci);
+			}
 		}
 	}
 
+	// Update for each pano
 	for(const Pano &p : panos) {
-		vector<pair<double, int>> its;
+		struct ItemStats {
+			double score;
+			int pm;
+			int i;
+		};
+		vector<ItemStats> its;
 		vector<double> bonus;
-		for(int i : p.items) if(check_item(items[i]))
-			its.emplace_back(score(W, items[i]), i);
+		vector<int> bonus_pm;
+		for(int i : p.items) if(check_item(items[i])) {
+			int pm = 0;
+			for(const Effect &e : items[i].effects) if(e.id == PMID) pm += e.max;
+			its.push_back({score(W, items[i]), pm, i});
+		}
 		for(const vector<Effect> &es : p.effects) {
 			double sc = 0;
-			for(const Effect &e : es) sc += W[e.id] * e.max;
+			int pm = 0;
+			for(const Effect &e : es)
+				if(e.id == PMID) pm += e.max;
+				else sc += W[e.id] * e.max;
 			bonus.push_back(sc);
+			bonus_pm.push_back(pm);
 		}
 
 		struct Subset {
 			vector<pair<int, int>> updt;
 			double score = 0.;
 			int m = 0;
-			int bonus;
+			int bonus, pm;
 		};
 		vector<Subset> subsets;
 		const int nits = its.size();
@@ -192,7 +247,7 @@ array<int, SLOTS> optimize(const array<double, EFFECTS> &W) {
 		for(int mp = 1; mp < MP; ++mp) {
 			Subset &ss = subsets.emplace_back();
 			for(int u = 0; u < nits; ++u) if((mp>>u)&1) {
-				const auto &[sc, i] = its[u];
+				const auto &[sc, pm, i] = its[u];
 				int t = items[i].type;
 				if(ss.m&(1<<t)) {
 					if(t == Item::Arme) goto bad_sub;
@@ -202,10 +257,14 @@ array<int, SLOTS> optimize(const array<double, EFFECTS> &W) {
 					} else assert(false);
 				}
 				ss.score += sc;
+				ss.pm += pm;
 				ss.m |= 1<<t;
 				ss.updt.emplace_back(t, i);
 			}
-			ss.score += bonus[ss.bonus = min(ss.updt.size()-1, bonus.size()-1)];
+			ss.bonus = min(ss.updt.size()-1, bonus.size()-1);
+			ss.score += bonus[ss.bonus];
+			ss.pm += bonus_pm[ss.bonus];
+			if(ss.pm >= PMA) goto bad_sub;
 			if((ss.m>>Item::Anneau)&1 && !((ss.m>>Item::Dofus)&1)) {
 				subsets.push_back(ss);
 				subsets.back().m ^= (1<<Item::Anneau) | (1<<Item::Dofus);
@@ -221,59 +280,92 @@ array<int, SLOTS> optimize(const array<double, EFFECTS> &W) {
 		}
 
 		for(int m = A.size()-1; m >= 0; --m) {
-			if(A[m][0].first == numeric_limits<double>::min()) continue;
-			for(const auto &[updt, score, m2, bonus2] : subsets) {
+			if((m>>Item::Dofus)&1 && !((m>>Item::Anneau)&1)) continue;
+			for(const auto &[updt, sc2, m2, bonus2, pm2] : subsets) {
 				if(m&m2) continue;
-				for(int bonus = 0; bonus < 4; ++bonus) {
-					if(A[m][bonus].first == numeric_limits<double>::min()) continue;
-					const double sc2 = A[m][bonus].first + score;
-					const int m3 = m|m2;
+				const int m3 = m|m2;
+				const int PMA_0 = max(-pm2, 0);
+				const int PMA_1 = PMA - max(pm2, 0);
+				for(int bonus = 0; bonus < 4; ++bonus) for(int pm = PMA_0; pm < PMA_1; ++pm) {
+					if(A[m][bonus][pm].first == numeric_limits<double>::min()) continue;
+					const double sc3 = A[m][bonus][pm].first + sc2;
 					const int bonus3 = min(bonus + bonus2, 3);
-					if(A[m3][bonus3].first >= sc2) continue;
-					A[m3][bonus3].first = sc2;
-					A[m3][bonus3].second = A[m][bonus].second;
-					for(const auto &[t, i] : updt) A[m3][bonus3].second[t] = i;
+					const int pm3 = pm + pm2;
+					if(A[m3][bonus3][pm3].first >= sc3) continue;
+					A[m3][bonus3][pm3].first = sc3;
+					A[m3][bonus3][pm3].second = A[m][bonus][pm].second;
+					for(const auto &[t, i] : updt) A[m3][bonus3][pm3].second[t] = i;
 				}
 			}
 		}
 	}
 
-	sort(dofus.rbegin(), dofus.rend());
-	double dofus_score_1 = 0., dofus_score_2 = 0.;
-	array<int, NDOFUS> dofus_1, dofus_2;
-	dofus_1.fill(-1);
-	dofus_2.fill(-1);
-	for(int i = 0; i < NDOFUS; ++i) {
-		dofus_score_1 += dofus[i].first;
-		dofus_1[i] = dofus[i].second;
-	}
-	for(int i = 0, j = 0; i < NDOFUS; ++i, ++j) {
-		while(j < (int) dofus.size()) {
-			const int c = items[dofus[j].second].condition;
-			if(c == -1) break;
-			if(conditions[c].type < 2) break;
-			if(conditions[c].effect_id != s2i["Bonus_de_panoplies"]) break;
-			assert(conditions[c].value == 3);
-			++j;
+	const auto get_dofus_sets = [&]() {
+		assert(dofus[0].size() + dofus[2].size() <= NDOFUS);
+		assert(dofus[0].size() + dofus[1].size() + dofus[2].size() >= NDOFUS);
+		array<pair<double, array<int, NDOFUS>>, 5> dofus_sets;
+		for(auto &[sc, s] : dofus_sets) sc = numeric_limits<double>::min();
+		for(int pm = 0; pm < 3; ++pm)
+			sort(dofus[pm].rbegin(), dofus[pm].rend());
+		double scdx = 0;
+		array<int, NDOFUS> ds;
+		for(int x = 0;; ++x) {
+			double scdy = scdx;
+			for(int y = 0;; ++y) {
+				const int xy = x+y;
+				const int pm = 1-x+y;
+				const int z = NDOFUS-x-y;
+				double sc = scdy;
+				for(int i = 0; i < z; ++i) {
+					sc += dofus[1][i].first;
+					ds[xy+i] = dofus[1][i].second;
+				}
+				if(sc > dofus_sets[pm].first) {
+					dofus_sets[pm].first = sc;
+					dofus_sets[pm].second = ds;
+				}
+				if(y >= (int)dofus[2].size()) break;
+				scdy += dofus[2][y].first;
+				ds[xy] = dofus[2][y].second;
+			}
+			if(x >= (int)dofus[0].size()) break;
+			scdx += dofus[0][x].first;
+			ds[x] = dofus[0][x].second;
 		}
-		if(j >= (int) dofus.size()) break;
-		dofus_score_2 += dofus[j].first;
-		dofus_2[i] = dofus[j].second;
+		return dofus_sets;
+	};
+	const auto dofus_sets_1 = get_dofus_sets();
+	const int BPID = s2i["Bonus_de_panoplies"];
+	for(int pm = 0; pm < 3; ++pm) {
+		for(int i = 0; i < (int) dofus[pm].size(); ++i) {
+			const int c = items[dofus[pm][i].second].condition;
+			if(c == -1) continue;;
+			if(conditions[c].type < 2) continue;
+			if(conditions[c].effect_id != BPID) continue;
+			assert(conditions[c].value == 3);
+			dofus[pm][i--] = dofus[pm].back();
+			dofus[pm].pop_back();
+		}
 	}
+	const auto dofus_sets_2 = get_dofus_sets();
 
-	int best_bonus = max_element(A.back().begin(), A.back().begin()+3) - A.back().begin();
-	double best_score = A.back()[best_bonus].first + dofus_score_1;
-	if(best_score < A.back()[3].first + dofus_score_2) {
-		best_bonus = 3;
-		best_score = A.back()[3].first + dofus_score_2;
-		copy_n(dofus_2.begin(), NDOFUS, sol.begin()+SLOTS_WD);
-	} else {
-		copy_n(dofus_1.begin(), NDOFUS, sol.begin()+SLOTS_WD);
+	int best_bonus = -1, best_pm = -1;
+	double best_score = numeric_limits<double>::min();
+	for(int b = 0; b < 4; ++b) {
+		const auto &ds = b == 3 ? dofus_sets_2 : dofus_sets_1;
+		for(int pm = 0; pm < 5; ++pm) {
+			const double sc = A.back()[b][PM-pm].first + ds[pm].first;
+			if(sc > best_score) {
+				best_score = sc;
+				best_bonus = b;
+				best_pm = pm;
+				copy_n(A.back()[b][PM-pm].second.begin(), SLOTS_WD, sol.begin());
+				copy_n(ds[pm].second.begin(), NDOFUS, sol.begin()+SLOTS_WD);
+			}
+		}
 	}
-	for(int i = 0; i < SLOTS_WD; ++i)
-		sol[i] = A.back()[best_bonus].second[i];
 	
-	cerr << "Score: " << best_score << endl;
+	cerr << "Score: " << best_score << ' ' << best_pm << ' ' << PM-best_pm << endl;
 	
 	return sol;
 }
@@ -345,12 +437,15 @@ int main() {
 	for(int i : sol) {
 		for(const auto &[id, min, max] : items[i].effects) stats[id] += max;
 		if(items[i].pano) {
-			if(pan_set.count(items[i].pano)) ++ stats[s2i["Bonus_de_panoplies"]];
 			++ pan_set[items[i].pano];
 		}
 	}
-	for(const auto &[p, c] : pan_set) if(c > 1)
+	for(const auto &[p, c] : pan_set) if(c > 1) {
 		cout << "Bonus " << panos[p-1].name << " " << c << "\n";
+		stats[s2i["Bonus_de_panoplies"]] += c-1;
+		for(const Effect &e : panos[p-1].effects[c-1])
+			stats[e.id] += e.max;
+	}
 	for(const string &s : {"PA", "PM"})
 		cout << s << ": " << stats[s2i[s]] << '\n';
 	
